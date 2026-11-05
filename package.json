@@ -1,0 +1,10 @@
+{
+  "name": "songsmith",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Generate music with SunoAPI, hosted on Netlify.",
+  "scripts": {
+    "dev": "netlify dev"
+  }
+}
