@@ -37,6 +37,9 @@
   .count { float: right; font-size: 12px; }
   .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
   .chip { background: var(--panel-2); border: 1px solid var(--border); color: var(--muted); padding: 4px 10px; border-radius: 999px; font-size: 12px; cursor: pointer; }
+  .lyric-gen { display: flex; gap: 8px; margin-top: 8px; align-items: center; }
+  .lyric-gen input { flex: 1; }
+  .lyric-gen .chip { white-space: nowrap; padding: 9px 12px; }
   .chip:hover { color: var(--text); border-color: var(--accent); }
   .go { margin-top: 20px; width: 100%; border: 0; border-radius: 12px; padding: 14px; font: 600 16px system-ui, sans-serif; color: #fff; cursor: pointer;
     background: linear-gradient(90deg, var(--accent), var(--accent-2)); }
@@ -92,7 +95,11 @@
       <input type="text" id="title" maxlength="80" placeholder="Coastline">
       <div id="lyricsWrap">
         <label for="lyrics">Lyrics <span class="count" id="lyricsCount">0/5000</span></label>
-        <textarea id="lyrics" maxlength="5000" rows="8" placeholder="[Verse]&#10;Windows down, the sun is high&#10;&#10;[Chorus]&#10;..."></textarea>
+        <textarea id="lyrics" maxlength="5000" rows="8" placeholder="[Verse]&#10;Windows down, the sun is high&#10;&#10;[Chorus]&#10;...&#10;&#10;Leave empty and we'll write lyrics for you."></textarea>
+        <div class="lyric-gen">
+          <input type="text" id="lyricIdea" maxlength="200" placeholder="Lyrics idea, e.g. missing home on a long road trip">
+          <button type="button" class="chip" id="writeLyrics">✍️ Write lyrics for me</button>
+        </div>
       </div>
       <div class="row">
         <div>
@@ -262,7 +269,7 @@ const fmt = (s) => `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(
 // ---- Generate + poll ----
 const STATUS_TEXT = {
   PENDING: "Queued — warming up the studio…",
-  TEXT_SUCCESS: "Lyrics written — composing the music…",
+  TEXT_SUCCESS: "Lyrics locked in — recording vocals and music…",
   FIRST_SUCCESS: "First track ready! Finishing the second version…",
   SUCCESS: "Done! Your songs are below.",
 };
@@ -273,13 +280,14 @@ const FAILED = {
   SENSITIVE_WORD_ERROR: "Your prompt contains words the provider doesn't allow. Try rephrasing.",
 };
 
+let pendingLyrics = "";
 function mapTrack(d) {
   return {
     id: d.id,
     title: d.title,
     tags: d.tags,
     duration: d.duration,
-    lyrics: d.prompt,
+    lyrics: d.prompt || pendingLyrics,
     imageUrl: d.image_url || d.imageUrl || d.source_image_url,
     audioUrl: d.audio_url || d.audioUrl,
     streamUrl: d.stream_audio_url || d.streamAudioUrl || d.source_stream_audio_url,
@@ -303,32 +311,96 @@ async function poll(taskId) {
   throw new Error("This is taking longer than expected. Check back in a few minutes.");
 }
 
+// ---- Lyrics: generate with SunoAPI's lyrics endpoint, then poll ----
+const LYRIC_FAILED = {
+  CREATE_TASK_FAILED: "Couldn't start writing lyrics.",
+  GENERATE_LYRICS_FAILED: "Lyrics generation failed.",
+  CALLBACK_EXCEPTION: "The provider hit an error while writing lyrics.",
+  SENSITIVE_WORD_ERROR: "Your idea contains words the provider doesn't allow. Try rephrasing.",
+};
+
+async function writeLyrics(idea) {
+  const { taskId } = await api("/.netlify/functions/lyrics", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ prompt: idea.slice(0, 200) }),
+  });
+  const started = Date.now();
+  while (Date.now() - started < 3 * 60 * 1000) {
+    await new Promise((r) => setTimeout(r, 3000));
+    let data;
+    try { data = await api(`/.netlify/functions/lyrics-status?taskId=${encodeURIComponent(taskId)}`); }
+    catch { continue; }
+    if (LYRIC_FAILED[data.status]) throw new Error(`${LYRIC_FAILED[data.status]}${data.errorMessage ? " " + data.errorMessage : ""}`);
+    const items = data.response?.data || data.response?.items || [];
+    const done = items.find((i) => i.text && i.status !== "failed");
+    if (data.status === "SUCCESS" || done) {
+      if (!done) throw new Error("No lyrics came back. Try a different idea.");
+      return { text: done.text.trim(), title: (done.title || "").trim() };
+    }
+  }
+  throw new Error("Writing lyrics took too long. Please try again.");
+}
+
+$("writeLyrics").onclick = async () => {
+  const idea = $("lyricIdea").value.trim() || $("title").value.trim() || $("style").value.trim();
+  if (!idea) return setStatus("Type a lyrics idea first.", { error: true });
+  $("writeLyrics").disabled = true; $("go").disabled = true;
+  setStatus("Writing lyrics…", { busy: true });
+  try {
+    const l = await writeLyrics(idea);
+    $("lyrics").value = l.text.slice(0, 5000);
+    if (!$("title").value.trim() && l.title) $("title").value = l.title.slice(0, 80);
+    updateCounts();
+    setStatus("Lyrics ready — edit them if you like, then hit Generate.");
+  } catch (err) {
+    setStatus(err.message, { error: true });
+  } finally {
+    $("writeLyrics").disabled = false; $("go").disabled = false;
+  }
+};
+
 $("form").onsubmit = async (e) => {
   e.preventDefault();
-  const body = {
-    customMode: mode === "custom",
-    instrumental: $("instrumental").checked,
-    model: $("model").value,
-    style: $("style").value,
-  };
-  if (mode === "simple") {
-    body.prompt = $("prompt").value;
-    if (!body.prompt.trim() && !body.style.trim()) return setStatus("Tell us what the song should be about.", { error: true });
-  } else {
-    Object.assign(body, {
-      title: $("title").value, lyrics: $("lyrics").value, negativeTags: $("negativeTags").value,
-      vocalGender: $("vocalGender").value, duration: $("duration").value,
-    });
-    if (!body.style.trim() && !(!body.instrumental && body.lyrics.trim()) && !body.negativeTags.trim())
-      return setStatus("Custom mode needs a style or lyrics.", { error: true });
-  }
+  const instrumental = $("instrumental").checked;
+  const style = $("style").value.trim();
+  const idea = mode === "simple" ? $("prompt").value.trim() : ($("lyricIdea").value.trim() || $("title").value.trim());
+  let title = mode === "custom" ? $("title").value.trim() : "";
+  let lyrics = mode === "custom" && !instrumental ? $("lyrics").value.trim() : "";
+
+  if (mode === "simple" && !idea && !style) return setStatus("Tell us what the song should be about.", { error: true });
+  if (mode === "custom" && !style && !lyrics && !$("negativeTags").value.trim() && !(idea && !instrumental))
+    return setStatus("Custom mode needs a style, lyrics, or a lyrics idea.", { error: true });
 
   $("go").disabled = true;
-  setStatus("Sending your idea to the studio…", { busy: true });
   try {
+    // Vocal songs always get real lyrics: write them first if the user didn't supply any.
+    if (!instrumental && !lyrics) {
+      setStatus("Writing lyrics…", { busy: true });
+      const l = await writeLyrics(idea || style);
+      lyrics = l.text;
+      if (!title && l.title) title = l.title;
+      if (mode === "custom") { $("lyrics").value = lyrics.slice(0, 5000); if (!$("title").value.trim()) $("title").value = title.slice(0, 80); updateCounts(); }
+    }
+
+    // Custom mode is used whenever we have lyrics, so the model sings them word-for-word.
+    const body = {
+      customMode: mode === "custom" || !!lyrics,
+      instrumental,
+      model: $("model").value,
+      style: style || (mode === "simple" ? idea.slice(0, 1000) : ""),
+      title: title.slice(0, 80),
+      lyrics: lyrics.slice(0, 5000),
+    };
+    if (mode === "simple" && !body.customMode) body.prompt = idea;
+    if (mode === "custom") Object.assign(body, {
+      negativeTags: $("negativeTags").value, vocalGender: $("vocalGender").value, duration: $("duration").value,
+    });
+
+    setStatus("Composing the music…", { busy: true });
     const { taskId } = await api("/.netlify/functions/generate", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
     });
+    pendingLyrics = lyrics;
     setStatus(STATUS_TEXT.PENDING, { busy: true });
     await poll(taskId);
     loadCredits();

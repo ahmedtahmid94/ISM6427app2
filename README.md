@@ -5,8 +5,8 @@ Static frontend (`public/`) + Netlify Functions (`netlify/functions/`) that call
 server-side, so the API key never reaches the browser.
 
 ## Features
-- **Simple mode** – describe the song; lyrics are written for you.
-- **Custom mode** – your own title, lyrics, style, styles to avoid, vocal gender, length.
+- **Simple mode** – describe the song; lyrics are written first (SunoAPI `/api/v1/lyrics`), then sung by the music model.
+- **Custom mode** – your own title, lyrics (or "Write lyrics for me"), style, styles to avoid, vocal gender, length.
 - Instrumental toggle, model picker (V6, V6 Wild, V6 Mini).
 - Live progress, streaming preview while rendering, download MP3, song history saved in your browser.
 
